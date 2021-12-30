@@ -6,7 +6,7 @@
 #include "err.h"
 #include "path_utils.h"
 
-#undef NDEBUG
+#define NDEBUG
 #ifdef NDEBUG
 #define ptry(x) if ((errno = x) != 0) syserr("Error %d",errno)
 #else
@@ -18,7 +18,7 @@
 typedef struct {
     HashMap *children;
     pthread_cond_t readlock, writelock;
-    bool readlocked, writelocked;
+    int rstate, wstate;
     int rwait, wwait, rrun, wrun;
 } Node;
 
@@ -51,7 +51,7 @@ Node *node_new() {
     Node *n = malloc(sizeof(Node));
     n->children = hmap_new();
     n->rwait = n->wwait = n->rrun = n->wrun = 0;
-    n->readlocked = n->writelocked = false;
+    n->rstate = n->wstate = 0;
     ptry(pthread_cond_init(&n->readlock, 0));
     ptry(pthread_cond_init(&n->writelock, 0));
     return n;
@@ -109,8 +109,11 @@ Node *start_read(Tree *tree, const char *path) {
         return NULL;
     }
     current->rwait++;
-    while (current->readlocked)
-        ptry(pthread_cond_wait(&current->readlock, &tree->mutex));
+    if (current->wrun != 0 || current->wwait != 0) {
+        while (current->rstate == 0)
+            ptry(pthread_cond_wait(&current->readlock, &tree->mutex));
+        current->rstate--;
+    }
     // Jeśli w międzyczasie nasz wierzchołek przestał istnieć, to zachowujemy
     // się tak, jakby od początku nie istniał.
     current = get_node(tree, path);
@@ -120,7 +123,6 @@ Node *start_read(Tree *tree, const char *path) {
     }
     current->rwait--;
     current->rrun++;
-    current->writelocked = true;
     ptry(pthread_mutex_unlock(&tree->mutex));
     return current;
 }
@@ -128,8 +130,8 @@ Node *start_read(Tree *tree, const char *path) {
 void end_read(Tree *tree, Node *current) {
     ptry(pthread_mutex_lock(&tree->mutex));
     current->rrun--;
-    if (current->rrun == 0) {
-        current->writelocked = false;
+    if (current->rrun == 0 && current->wwait > 0) {
+        current->wstate = 1;
         ptry(pthread_cond_signal(&current->writelock));
     }
     ptry(pthread_mutex_unlock(&tree->mutex));
@@ -139,15 +141,14 @@ Node *get_writelock(Tree *tree, const char *path) {
     Node *current = get_node(tree, path);
     if (current == NULL)
         return NULL;
-    if (current->wwait == 0)
-        current->readlocked = true;
     current->wwait++;
-    while (current->writelocked)
-        ptry(pthread_cond_wait(&current->writelock, &tree->mutex));
+    if (current->rrun > 0 || current->wrun > 0) {
+        while (current->wstate == 0)
+            ptry(pthread_cond_wait(&current->writelock, &tree->mutex));
+        current->wstate--;
+    }
     current->wwait--;
     current->wrun++;
-    current->writelocked = true;
-    current->readlocked = true;
     return current;
 }
 
@@ -156,11 +157,10 @@ void release_writelock(Node *current) {
         return;
     current->wrun--;
     if (current->rwait > 0) {
-        current->readlocked = false;
+        current->rstate = current->rwait;
         ptry(pthread_cond_broadcast(&current->readlock));
-    } else {
-        current->writelocked = false;
-        current->readlocked = false;
+    } else if (current->wwait > 0) {
+        current->wstate = 1;
         ptry(pthread_cond_signal(&current->writelock));
     }
 }
