@@ -9,6 +9,7 @@
 #define NDEBUG
 #ifdef NDEBUG
 #define ptry(x) if ((errno = x) != 0) syserr("Error %d",errno)
+//#define printf( ... ) do{}while(0)
 #else
 #define ptry(x) do { printf("%d ",__LINE__); puts(#x); if ((errno = x) != 0) syserr("Error %d", errno); } while (0)
 #endif
@@ -177,6 +178,7 @@ bool get_writelock(Tree *tree, Node *current) {
     if (current->rrun + current->wrun > 0 || current->wstate > 0) {
         while (current->wstate == 0)
             ptry(pthread_cond_wait(&current->writelock, &tree->mutex));
+        // TODO zwolnić co trzeba jak to się nie uda
         if (current->wstate == -1) {
             current->wwait--;
             return false;
@@ -189,18 +191,20 @@ bool get_writelock(Tree *tree, Node *current) {
 }
 
 void release_writelock(Node *current) {
+    if (current->wrun != 1)
+        syserr("%d %d %d %d",current->wwait, current->wrun, current->rwait, current->rrun);
     current->wrun--;
     if (current->rwait > 0) {
         current->rstate = current->rwait;
         ptry(pthread_cond_broadcast(&current->readlock));
-    } else if (current->wwait > 0) {
+    } else if (current->wwait > 0 && current->rrun == 0) {
         current->wstate = 1;
         ptry(pthread_cond_signal(&current->writelock));
     }
 }
 
 bool start_write(Tree *tree, const char *path1, const char *path2) {
-    static char component1[MAX_FOLDER_NAME_LENGTH + 1],
+    char component1[MAX_FOLDER_NAME_LENGTH + 1],
             component2[MAX_FOLDER_NAME_LENGTH + 1];
     bool has1 = false, has2 = false;
     Node *node1 = tree->root, *node2 = tree->root;
@@ -217,6 +221,7 @@ bool start_write(Tree *tree, const char *path1, const char *path2) {
                 release_held_readlocks(node1, get_father(node2));
                 return false;
             }
+            new1->height = node1->height + 1;
         }
         if (subpath2) {
             if (node1 != node2 || !subpath1)
@@ -228,6 +233,7 @@ bool start_write(Tree *tree, const char *path1, const char *path2) {
                 release_held_readlocks(get_father(new1), node2);
                 return false;
             }
+            new2->height = node2->height + 1;
         }
 
         if (node1 == node2 && subpath2 == NULL) {
@@ -268,7 +274,7 @@ bool start_write(Tree *tree, const char *path1, const char *path2) {
         if (!has1)
             get_writelock(tree, node1);
     }
-    return true;
+    return node1;
 }
 
 void end_write(Node *node1, Node *node2) {
@@ -278,17 +284,35 @@ void end_write(Node *node1, Node *node2) {
     release_held_readlocks(get_father(node1), get_father(node2));
 }
 
+bool start_read(Tree *tree, const char *path) {
+    char component[MAX_FOLDER_NAME_LENGTH + 1];
+    Node *node = tree->root;
+    const char *subpath = path;
+    while ((subpath = split_path(subpath, component))) {
+        get_readlock(tree, node);
+        Node *new = hmap_get(node->children, component);
+        if (new == NULL) {
+            release_held_readlocks(node, node);
+            return false;
+        }
+        new->height = node->height + 1;
+        node = new;
+    }
+    get_readlock(tree, node);
+    return true;
+}
+
 char *tree_list(Tree *tree, const char *path) {
     if (!is_path_valid(path))
         return NULL;
     ptry(pthread_mutex_lock(&tree->mutex));
-    Node *current = get_node(tree, path);
-    if (current == NULL) {
+    if (!start_read(tree, path)) {
         ptry(pthread_mutex_unlock(&tree->mutex));
         return NULL;
     }
-    get_readlock(tree, current);
+    Node *current = get_node(tree, path);
     ptry(pthread_mutex_unlock(&tree->mutex));
+    printf("l%s\n",path);
     size_t size = hmap_size(current->children);
     size_t fullsize = 0;
     const char *children[size + 1];
@@ -308,7 +332,7 @@ char *tree_list(Tree *tree, const char *path) {
     }
 
     pthread_mutex_lock(&tree->mutex);
-    release_readlocks(current, 1);
+    release_held_readlocks(current, current);
     pthread_mutex_unlock(&tree->mutex);
     return result;
 }
@@ -355,6 +379,7 @@ int tree_move(Tree *tree, const char *source, const char *target) {
         return EEXIST;
     }
     ptry(pthread_mutex_unlock(&tree->mutex));
+    printf("%s m %s\n", source, target);
     hmap_remove(source_node->children, source_name);
     hmap_insert(target_node->children, dest_name, to_move);
     to_move->father = target_node;
@@ -367,8 +392,11 @@ int tree_move(Tree *tree, const char *source, const char *target) {
 }
 
 int tree_create(Tree *tree, const char *path) {
+    printf("c%s\n",path);
     ptry(pthread_mutex_lock(&tree->mutex));
+    printf("e%s\n",path);
     if (!is_path_valid(path)) {
+        printf("e%s\n",path);
         ptry(pthread_mutex_unlock(&tree->mutex));
         return EINVAL;
     }
@@ -376,6 +404,7 @@ int tree_create(Tree *tree, const char *path) {
     char name[MAX_FOLDER_NAME_LENGTH + 1];
     char *parent = make_path_to_parent(path, name);
     if (parent == NULL) {
+        printf("r%s\n",path);
         ptry(pthread_mutex_unlock(&tree->mutex));
         return EEXIST;
     }
@@ -386,10 +415,12 @@ int tree_create(Tree *tree, const char *path) {
     node = get_node(tree, parent);
     if (hmap_get(node->children, name) != NULL) {
         end_write(node, node);
+        printf("x%s\n",path);
         ptry(pthread_mutex_unlock(&tree->mutex));
         return EEXIST;
     }
     ptry(pthread_mutex_unlock(&tree->mutex));
+    printf("C%s\n",path);
     Node *new = node_new(node);
     hmap_insert(node->children, name, new);
     ptry(pthread_mutex_lock(&tree->mutex));
@@ -429,7 +460,7 @@ int tree_remove(Tree *tree, const char *path) {
         return ENOTEMPTY;
     }
     ptry(pthread_mutex_unlock(&tree->mutex));
-
+    printf("r%s\n", path);
     node_free(tree, old);
     hmap_remove(node->children, name);
     ptry(pthread_mutex_lock(&tree->mutex));
