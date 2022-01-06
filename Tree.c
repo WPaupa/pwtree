@@ -10,6 +10,7 @@
 #ifdef NDEBUG
 #define ptry(x) if ((errno = x) != 0) syserr("Error %d",errno)
 #define printf(...) do{}while(0)
+#define fprintf(...) do{}while(0)
 #else
 #define ptry(x) do { printf("%d ",__LINE__); puts(#x); if ((errno = x) != 0) syserr("Error %d", errno); } while (0)
 #endif
@@ -138,12 +139,15 @@ void release_readlock(Node *current) {
     if (current == NULL)
         return;
     current->rrun--;
-    //if (current->rrun < 0)
-    //    syserr("r%d %d %d %d", current->rrun, current->rwait, current->wrun,
-    //           current->wwait);
+    if (current->rrun < 0)
+        syserr("r%d %d %d %d", current->rrun, current->rwait, current->wrun,
+               current->wwait);
     if (current->rrun == 0 && current->wwait > 0 && current->wrun == 0 && current->rstate == 0 && current->wstate == 0) {
         current->wstate = 1;
         ptry(pthread_cond_signal(&current->writelock));
+    } else if (current->rwait > 0 && current->rrun == 0 && current->wwait == 0 && current->wrun == 0 && current->rstate == 0 && current->wstate == 0) {
+        current->rstate = current->rwait;
+        ptry(pthread_cond_broadcast(&current->readlock));
     }
 }
 
@@ -204,106 +208,56 @@ bool check_readlocks(Node *node) {
     return (node == NULL) || (node->rrun > 0 && check_readlocks(get_father(node)));
 }
 
-Node *start_write(Tree *tree, const char *path1, const char *path2) {
+bool start_write(Tree *tree, const char *path1, const char *path2) {
     int cmp = strcmp(path1, path2);
-    if (cmp < 0) {
+    // Upewniamy się, że path2 nie jest prefixem niewłaściwym path1
+    // i jednocześnie zabezpieczamy się przed deadlockiem.
+    if (cmp > 0) {
         const char *tmp = path1;
         path1 = path2;
         path2 = tmp;
     }
-    fprintf(stderr,"sw %s %s\n",path1,path2);
     char component1[MAX_FOLDER_NAME_LENGTH + 1],
             component2[MAX_FOLDER_NAME_LENGTH + 1];
-    bool has1 = false, has2 = false;
     Node *node1 = tree->root, *node2 = tree->root;
-    const char *subpath1 = split_path(path1, component1),
-            *subpath2 = split_path(path2, component2);
-    while (subpath1 || subpath2) {
-        Node *new1 = node1, *new2 = node2;
-        if (subpath1) {
-            get_readlock(tree, node1);
-            new1 = hmap_get(node1->children, component1);
-            if (new1 == NULL) {
-                if (has2)
-                    release_writelock(node2);
-                release_held_readlocks(node1, get_father(node2));
-                return false;
-            }
-            if (get_father(new1) != node1) {
-                print_tree(tree);
-                syserr("DUPAZUPA %p %p %p", new1, get_father(new1), node1);
-            }
-            new1->height = node1->height + 1;
+    const char *subpath1 = path1, *subpath2 = path2;
+    while ((subpath1 = split_path(subpath1, component1))) {
+        get_readlock(tree, node1);
+        Node *new1 = hmap_get(node1->children, component1);
+        if (new1 == NULL) {
+            release_held_readlocks(node1, node1);
+            return false;
         }
-        if (subpath2) {
-            if (node1 != node2 || !subpath1)
-                get_readlock(tree, node2);
-            new2 = hmap_get(node2->children, component2);
-            if (new2 == NULL) {
-                if (has1)
-                    release_writelock(node1);
-                release_held_readlocks(get_father(new1), node2);
+        new1->height = node1->height + 1;
+        if (node1 == node2) {
+            subpath2 = split_path(subpath2, component2);
+            if ((node2 = hmap_get(node2->children, component2)) == NULL) {
+                release_held_readlocks(node1, node1);
                 return false;
             }
-            new2->height = node2->height + 1;
-        }
-
-        if (node1 == node2 && subpath2 == NULL) {
-            if (node2->rrun == 0)
-                syserr("rrun");
-            release_readlock(node2);
-            get_writelock(tree, node2);
-            node1->rrun++;
-            new1 = hmap_get(node1->children, component1);
-            if (new1 == NULL) {
-                release_writelock(node2);
-                release_held_readlocks(node1, get_father(node2));
-                return false;
-            }
-            has2 = true;
-        }
-        if (node1 == node2 && subpath1 == NULL) {
-            if (node1->rrun == 0)
-                syserr("rrun");
-            release_readlock(node1);
-            get_writelock(tree, node1);
-            node2->rrun++;
-            new2 = hmap_get(node2->children, component2);
-            if (new2 == NULL) {
-                release_writelock(node1);
-                release_held_readlocks(get_father(new1), node2);
-                return false;
-            }
-            has1 = true;
+            node2->height = new1->height;
         }
         node1 = new1;
-        node2 = new2;
-        if (!check_readlocks(get_father(new1)) || !check_readlocks(get_father(new2))) {
-            print_tree(tree);
-            fprintf(stderr, "%s %s %p %p\n", path1, path2, new1, new2);
-            fprintf(stderr, "%d %d %d", get_father(new1)->wrun, new1->wrun, new2->wrun);
-            syserr("%p %p",node1,node2);
-        }
-        if (subpath1 != NULL)
-            subpath1 = split_path(subpath1, component1);
-        if (subpath2 != NULL)
-            subpath2 = split_path(subpath2, component2);
     }
 
-    // Jeśli tutaj doszliśmy, to zdobycie writelocków prędzej czy później
-    // musi się udać.
-    if (cmp == 0) {
-        if (!has1)
-            get_writelock(tree, node1);
-    } else {
-        if (!has2)
-            get_writelock(tree, node2);
-        if (!has1)
-            get_writelock(tree, node1);
+    get_writelock(tree, node1);
+    while ((subpath2 = split_path(subpath2, component2))) {
+        if (node1 == node2)
+            node2->rrun++;
+        else
+            get_readlock(tree, node2);
+        Node *new = hmap_get(node2->children, component2);
+        if (new == NULL) {
+            release_writelock(node1);
+            release_held_readlocks(get_father(node1), node2);
+            return false;
+        }
+        new->height = node2->height + 1;
+        node2 = new;
     }
-    if (cmp < 0)
-        return node2;
-    return node1;
+    if (cmp != 0)
+        get_writelock(tree, node2);
+    return true;
 }
 
 void end_write(Node *node1, Node *node2) {
@@ -381,8 +335,7 @@ int tree_move(Tree *tree, const char *source, const char *target) {
     char *target_parent = make_path_to_parent(target, dest_name);
     char *source_parent = make_path_to_parent(source, source_name);
     fprintf(stderr, "%s e %s\n", source, target);
-    Node *help = start_write(tree, source_parent, target_parent);
-    if (!help) {
+    if (!start_write(tree, source_parent, target_parent)) {
         ptry(pthread_mutex_unlock(&tree->mutex));
         free(target_parent);
         free(source_parent);
@@ -394,8 +347,7 @@ int tree_move(Tree *tree, const char *source, const char *target) {
     if (source_node == NULL || target_node == NULL) {
         puts("DUPA");
         print_tree(tree);
-        syserr("%s %s %p %p %p", source, target, source_node, target_node,
-               help);
+        syserr("%s %s %p %p", source, target, source_node, target_node);
     }
     Node *to_move = hmap_get(source_node->children, source_name);
     if (to_move == NULL) {
