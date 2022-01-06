@@ -134,10 +134,10 @@ void get_readlock(Tree *tree, Node *current) {
     current->rrun++;
 }
 
-void release_readlocks(Node *current, int number) {
+void release_readlock(Node *current) {
     if (current == NULL)
         return;
-    current->rrun -= number;
+    current->rrun--;
     if (current->rrun < 0)
         syserr("r%d %d %d %d",current->rrun, current->rwait, current->wrun, current->wwait);
     if (current->rrun == 0 && current->wwait > 0 && current->wrun == 0) {
@@ -149,15 +149,15 @@ void release_readlocks(Node *current, int number) {
 void release_held_readlocks(Node *node1, Node *node2) {
     while (node1 != NULL || node2 != NULL) {
         if (get_height(node1) > get_height(node2)) {
-            release_readlocks(node1, 1);
+            release_readlock(node1);
             node1 = get_father(node1);
         } else if (get_height(node1) < get_height(node2)) {
-            release_readlocks(node2, 1);
+            release_readlock(node2);
             node2 = get_father(node2);
         } else {
-            release_readlocks(node1, 1);
+            release_readlock(node1);
             if (node1 != node2) {
-                release_readlocks(node2, 1);
+                release_readlock(node2);
             }
             node1 = get_father(node1);
             node2 = get_father(node2);
@@ -231,13 +231,13 @@ bool start_write(Tree *tree, const char *path1, const char *path2) {
         }
 
         if (node1 == node2 && subpath2 == NULL) {
-            release_readlocks(node2, 1);
+            release_readlock(node2);
             get_writelock(tree, node2);
             node1->rrun++;
             has2 = true;
         }
         if (node1 == node2 && subpath1 == NULL) {
-            release_readlocks(node1, 1);
+            release_readlock(node1);
             get_writelock(tree, node1);
             node2->rrun++;
             has1 = true;
