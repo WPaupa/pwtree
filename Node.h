@@ -24,7 +24,7 @@ typedef struct Node Node;
 void set_father(Node *node, Node *father);
 
 // Zwraca hashmapę reprezentującą dzieci danego wierzchołka.
-HashMap *get_children(Node *node);
+HashMap *get_children(Node *);
 
 // Stworzenie nowego wierzchołka o podanym ojcu
 Node *node_new(Node *);
