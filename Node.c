@@ -45,7 +45,18 @@ void set_father(Node *node, Node *father) {
 int get_height(Node *node) {
     if (node == NULL)
         return 0;
-    return node->height;
+    ptry(pthread_mutex_lock(&node->mutex));
+    int h = node->height;
+    ptry(pthread_mutex_unlock(&node->mutex));
+    return h;
+}
+
+void set_height(Node *node, int h) {
+    if (node == NULL)
+        return;
+    ptry(pthread_mutex_lock(&node->mutex));
+    node->height = h;
+    ptry(pthread_mutex_unlock(&node->mutex));
 }
 
 Node *node_new(Node *father) {
@@ -56,12 +67,12 @@ Node *node_new(Node *father) {
     n->rwait = n->wwait = n->rrun = n->wrun = 0;
     n->rstate = n->wstate = 0;
     n->father = father;
-    n->height = get_height(father) + 1;
     ptry(pthread_cond_init(&n->readlock, 0));
     ptry(pthread_cond_init(&n->writelock, 0));
     ptry(pthread_cond_init(&n->rprio, 0));
     ptry(pthread_cond_init(&n->wprio, 0));
     ptry(pthread_mutex_init(&n->mutex, 0));
+    set_height(n, get_height(father) + 1);
     return n;
 }
 
@@ -165,6 +176,7 @@ void release_held_readlocks(Node *node1, Node *node2) {
 bool start_read(Node *root, const char *path) {
     char component[MAX_FOLDER_NAME_LENGTH + 1];
     Node *node = root;
+    int h = 1;
     const char *subpath = path;
     while ((subpath = split_path(subpath, component))) {
         // Dostajemy readlocka, począwszy od roota
@@ -176,11 +188,9 @@ bool start_read(Node *root, const char *path) {
             release_held_readlocks(node, node);
             return false;
         }
-        ptry(pthread_mutex_lock(&new->mutex));
         // Definicja height zmusza nas do aktualizowania jej przy
         // zdobywaniu readlocków.
-        new->height = node->height + 1;
-        ptry(pthread_mutex_unlock(&new->mutex));
+        set_height(new, ++h);
         node = new;
     }
     // Zostało jeszcze nam dostać readlocka na ostatnim wierzchołku.
@@ -247,6 +257,7 @@ bool start_write(Node *root, const char *path1, const char *path2) {
     char component1[MAX_FOLDER_NAME_LENGTH + 1], component2[
             MAX_FOLDER_NAME_LENGTH + 1];
     Node *node1 = root, *node2 = root;
+    int h1 = 1, h2 = 1;
     const char *subpath1 = path1, *subpath2 = path2;
     while ((subpath1 = split_path(subpath1, component1))) {
         // Zdobywamy readlocki na pierwszej ścieżce
@@ -257,9 +268,7 @@ bool start_write(Node *root, const char *path1, const char *path2) {
             release_held_readlocks(node1, node1);
             return false;
         }
-        ptry(pthread_mutex_lock(&new1->mutex));
-        new1->height = node1->height + 1;
-        ptry(pthread_mutex_unlock(&new1->mutex));
+        set_height(new1, ++h1);
         // Dopóki ścieżki się pokrywają, z drugim wierzchołkiem też schodzimy,
         // ale nie zdobywamy żadnych locków
         if (node1 == node2) {
@@ -268,9 +277,7 @@ bool start_write(Node *root, const char *path1, const char *path2) {
                 release_held_readlocks(node1, node1);
                 return false;
             }
-            ptry(pthread_mutex_lock(&node2->mutex));
-            node2->height = new1->height;
-            ptry(pthread_mutex_unlock(&node2->mutex));
+            set_height(node2, ++h2);
         }
         node1 = new1;
     }
@@ -296,9 +303,7 @@ bool start_write(Node *root, const char *path1, const char *path2) {
             release_held_readlocks(get_father(node1), node2);
             return false;
         }
-        ptry(pthread_mutex_lock(&new->mutex));
-        new->height = node2->height + 1;
-        ptry(pthread_mutex_unlock(&new->mutex));
+        set_height(new, ++h2);
         node2 = new;
     }
     // Jeśli node1 =/= node2, to musimy zdobyć drugi writelock
