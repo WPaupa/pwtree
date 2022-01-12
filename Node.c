@@ -4,11 +4,11 @@
 #include <string.h>
 
 // Konwencja używana w synchronizacji:
-// z funkcji czytających z hashmapy children (jak find i iteratora)
-// można korzystać, jeśli się jest czytelnikiem lub pisarzem danego Node,
+// z funkcji czytających z hashmapy children (jak find i iteratora) i pola
+// father można korzystać, jeśli się jest czytelnikiem lub pisarzem danego Node,
 // z funkcji modyfukujących hashmapę (jak insert i remove) oraz pole father
 // tylko jeśli się jest pisarzem danego node, a z pozostałych zmiennych
-// składowych Node można korzystać tylko jeśli się ma mutexa.
+// składowych Node można korzystać tylko, gdy się ma mutexa.
 typedef struct Node {
     HashMap *children;
     // Zmienne warunkowe do czekania na dostęp do czytelni
